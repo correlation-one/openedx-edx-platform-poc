@@ -1,41 +1,26 @@
-""" Common Authentication Handlers used across projects. """
-
-import logging
 import json
 import os
 import requests
 import secrets
 import string
+
 from datetime import datetime
 from pathlib import Path
 from logging import getLogger
 from jose import jwt
 
-import django.utils.timezone
 from django.contrib.auth import get_user_model
-
-from oauth2_provider import models as dot_models
-from rest_framework.exceptions import AuthenticationFailed
 from rest_framework.authentication import BaseAuthentication, get_authorization_header
-from edx_django_utils.monitoring import set_custom_attribute
-
-OAUTH2_TOKEN_ERROR = 'token_error'
-OAUTH2_TOKEN_ERROR_EXPIRED = 'token_expired'
-OAUTH2_TOKEN_ERROR_MALFORMED = 'token_malformed'
-OAUTH2_TOKEN_ERROR_NONEXISTENT = 'token_nonexistent'
-OAUTH2_TOKEN_ERROR_NOT_PROVIDED = 'token_not_provided'
-OAUTH2_USER_NOT_ACTIVE_ERROR = 'user_not_active'
-OAUTH2_USER_DISABLED_ERROR = 'user_is_disabled'
-
-logger = logging.getLogger(__name__)
-
-# ...................................................................................
-# ....................................OpenEdx PoC....................................
+from common.djangoapps.student.models import (
+    UserProfile,
+    Registration
+)
+logger = getLogger(__name__)
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 AUTH0_ALGORITHMS = ["RS256"]
-AUTH0_JWKS_DIR = os.path.join(BASE_DIR, "api", "auth0")
+AUTH0_JWKS_DIR = os.path.join(BASE_DIR, "fellow_auth0", "auth0")
 AUTH0_JWKS_FILE_PATH = AUTH0_JWKS_DIR + "/jwks.json"
 
 # AUTH0_DOMAIN = os.getenv("AUTH0_DOMAIN")
@@ -74,7 +59,32 @@ class UserDoesNotExistsError(Exception):
         super().__init__(message)
 
 
-class BearerAuthentication(BaseAuthentication):
+class SetUserFromAuth0Token:
+    def __init__(self, get_response):
+        self.get_response = get_response
+        self.auth0_authenticator = Auth0TokenAuthentication()
+
+    def __call__(self, request):
+
+        print("=====***C1 OPENEDX PoC***=====")        
+
+        try:
+            authenticate_header = self.auth0_authenticator.authenticate_header(request)
+            logger.info(authenticate_header)
+            training_edx_user = self.auth0_authenticator.authenticate(request)
+            request.user = training_edx_user
+
+        except Exception as error:
+            print(error)
+
+        response = self.get_response(request)
+
+        print("=======*C1 OPENEDX PoC*=======") 
+
+        return response
+
+
+class Auth0TokenAuthentication(BaseAuthentication):
     """
     Auth0 token based authentication.
 
@@ -87,38 +97,27 @@ class BearerAuthentication(BaseAuthentication):
 
     # this setting determines if the Auth0 JWKS file needs to be updated
     MAX_JWKS_UPDATE_HOURS = 12
-    www_authenticate_realm = 'api'
-    allow_inactive_users = False
+
+    def authenticate_header(self, request):
+        # When a custom authentication method is implemented and is located at the
+        # beginning of DEFAULT_AUTHENTICATION_CLASSES, it must implement this method
+        # to indicate the client how to authenticate. This implementation will return a
+        # 401 status, if not implemented 403. Reference (Custom authentication header):
+        # https://www.django-rest-framework.org/api-guide/authentication/
+        return "Bearer realm=token"
 
     def authenticate(self, request):
-
-        set_custom_attribute("BearerAuthentication", "Failed")  # default value
-
-        print("=====***C1 OPENEDX PoC: BearerAuthentication***=====")
-
         auth_header = get_authorization_header(request).split()
-
-        if len(auth_header) == 1:  # lint-amnesty, pylint: disable=no-else-raise
-            raise AuthenticationFailed({
-                'error_code': OAUTH2_TOKEN_ERROR_NOT_PROVIDED,
-                'developer_message': 'Invalid token header. No credentials provided.'})
-        elif len(auth_header) > 2:
-            raise AuthenticationFailed({
-                'error_code': OAUTH2_TOKEN_ERROR_MALFORMED,
-                'developer_message': 'Invalid token header. Token string should not contain spaces.'})
-
-        if auth_header and auth_header[0].lower() == b'bearer':
-            access_token = auth_header[1].decode('utf8')
-        else:
-            set_custom_attribute("BearerAuthentication", "None")
-            return None
-
-        user = self._authenticate_token(access_token)
+        # validate if the header contains the expected content
+        if not auth_header or auth_header[0].lower() != "Bearer".lower().encode():
+            logger.warning("Received an authentication header without 'Bearer' token")
+            raise BearerTokenNotPresentError(message="C1 PoC: bearer token not present in authentication header")
+        if len(auth_header) == 1 or len(auth_header) > 2:
+            logger.warning("Provided authentication header has an unexpected length")
+            raise BearerTokenNotPresentError(message="C1 PoC: authentication header has an unexpected length")
+        # obtain the token and try to authenticate against Auth0
         token = auth_header[1]
-
-        set_custom_attribute("BearerAuthentication", "Success")
-
-        return user, token
+        return self._authenticate_token(token)
 
     def _authenticate_token(self, token):
         payload, is_valid = self._is_valid_auth0_token(token)
@@ -140,6 +139,7 @@ class BearerAuthentication(BaseAuthentication):
         # user data contains: name, nickname, email, picture, updated_at, email_verified
         email = user_data.get("email")
         name = user_data.get('name')
+        username = "middleware_generated_"+name.replace(" ", "_").lower()
         logger.info(f"auth0 user has email {email}")
 
         if not email:
@@ -150,7 +150,11 @@ class BearerAuthentication(BaseAuthentication):
             training_user = get_user_model().objects.get(email__iexact=email)
             # if the user exists but does not have an Auth0 UUID, update the data
             # training_user.auth0_uuid = auth0_uuid
-            training_user.save()
+            try:
+                training_user.save()
+            except Exception:
+                logger.exception(f"User creation failed for user with email {email}.")
+                raise
             logger.info(
                 f"Updated user '{training_user}' with the Auth0 UUID '{auth0_uuid}'"
             )
@@ -159,8 +163,25 @@ class BearerAuthentication(BaseAuthentication):
                 f"User with email '{email}' does not exists on OpenEdx DB "
             )
             # create the user if it doesn't exist in the openedx db
-            password = self._get_random_password()
-            training_user = get_user_model().objects.create(username=name, email=email, password=password)
+            training_user = get_user_model().objects.create(username=username, email=email,is_active=True)
+            training_user.set_unusable_password()
+            training_user.save()
+
+            # Replicating what do_create_account does, create a registration and a profile
+            registration = Registration()
+            registration.register(training_user)
+
+            profile = UserProfile(
+                user=training_user,
+                name=name,
+                gender="nb",
+                year_of_birth=1992
+                )
+            try:
+                profile.save()
+            except Exception:
+                logger.exception(f"UserProfile creation failed for user {training_user.id}.")
+                raise
             logger.info(
                 f"User with email '{email}' created in OpenEdx DB"
             )
@@ -169,7 +190,7 @@ class BearerAuthentication(BaseAuthentication):
 
     def _is_valid_auth0_token(self, token):
         jwks = self._get_auth0_jwks()
-        logger.info("Got jwks")
+
         try:
             unverified_header = jwt.get_unverified_header(token)
         except Exception:
@@ -243,13 +264,11 @@ class BearerAuthentication(BaseAuthentication):
                 not os.path.exists(AUTH0_JWKS_FILE_PATH)
                 or __get_auth0_jwks_last_modified_hours() >= self.MAX_JWKS_UPDATE_HOURS
             ):
-                resp = requests.get(
-                    AUTH0_DOMAIN + "/.well-known/jwks.json"
-                )
+                url = AUTH0_DOMAIN + "/.well-known/jwks.json"
+                resp = requests.get(url)
                 jwks = resp.json()
                 # creates the directory and file if does not exist and write the JWKS
                 Path(AUTH0_JWKS_DIR).mkdir(parents=True, exist_ok=True)
-                logger.info(f"New JWKS file will be created: {AUTH0_JWKS_FILE_PATH}")
                 with open(AUTH0_JWKS_FILE_PATH, "w") as json_file:
                     json.dump(jwks, json_file, indent=4)
 
@@ -270,47 +289,3 @@ class BearerAuthentication(BaseAuthentication):
             )
             for i in range(password_lenght)
         )
-
-    def get_access_token(self, access_token):
-        """
-        Return a valid access token stored by django-oauth-toolkit (DOT), or
-        None if no matching token is found.
-        """
-        token_query = dot_models.AccessToken.objects.select_related('user')
-        return token_query.filter(token=access_token).first()
-
-    def authenticate_header(self, request):
-        """
-        Return a string to be used as the value of the `WWW-Authenticate`
-        header in a `401 Unauthenticated` response
-        """
-        return 'Bearer realm="%s"' % self.www_authenticate_realm
-
-
-class BearerAuthenticationAllowInactiveUser(BearerAuthentication):
-    """
-    Currently, is_active field on the user is coupled
-    with whether or not the user has verified ownership of their claimed email address.
-    Once is_active is decoupled from verified_email, we will no longer need this
-    class override.
-
-    This class can be used for an OAuth2-accessible endpoint that allows users to access
-    that endpoint without having their email verified.  For example, this is used
-    for mobile endpoints.
-    """
-
-    allow_inactive_users = True
-
-
-class OAuth2Authentication(BearerAuthentication):
-    """
-    Creating temperary class cause things outside of edx-platform need OAuth2Authentication.
-    This will be removed when repos outside edx-platform import BearerAuthentiction instead.
-    """
-
-
-class OAuth2AuthenticationAllowInactiveUser(BearerAuthenticationAllowInactiveUser):
-    """
-    Creating temperary class cause things outside of edx-platform need OAuth2Authentication.
-    This will be removed when repos outside edx-platform import BearerAuthentiction instead.
-    """
