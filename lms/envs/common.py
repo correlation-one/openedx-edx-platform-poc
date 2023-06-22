@@ -2227,6 +2227,9 @@ MIDDLEWARE = [
     # Handles automatically storing user ids in django-simple-history tables when possible.
     'simple_history.middleware.HistoryRequestMiddleware',
 
+    # C1 - OpenEdx PoC: HANDLE AUTH0 JWT Token from Fellow App
+    'openedx.core.djangoapps.fellow_auth0.middleware.SetUserFromAuth0Token',
+
     # This must be last
     'openedx.core.djangoapps.site_configuration.middleware.SessionCookieDomainOverrideMiddleware',
 ]
