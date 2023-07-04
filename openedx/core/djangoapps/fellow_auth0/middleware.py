@@ -1,10 +1,13 @@
-from logging import getLogger
-from jose import jwt
-import requests
 import json
 import os
+import requests
+import secrets
+import string
+
 from datetime import datetime
 from pathlib import Path
+from logging import getLogger
+from jose import jwt
 
 from django.contrib.auth import get_user_model
 from rest_framework.authentication import BaseAuthentication, get_authorization_header
@@ -31,6 +34,28 @@ if AUTH0_API_AUDIENCE is None:
 
 AUTH0_ISSUER="https://login.correlation-one.com/"
 
+
+class BearerTokenNotPresentError(Exception):
+    """Raise when the expected bearer token is not present in the incomming request"""
+
+    def __init__(self, message):
+        super().__init__(message)
+
+
+class InvalidBearerTokenError(Exception):
+    """Raise when token is invalid, for example if it has expired"""
+
+    def __init__(self, message):
+        super().__init__(message)
+
+
+class UserDoesNotExistsError(Exception):
+    """Raise when the user does not exist in OpenEdx DB"""
+
+    def __init__(self, message):
+        super().__init__(message)
+
+
 class SetUserFromAuth0Token:
     def __init__(self, get_response):
         self.get_response = get_response
@@ -46,8 +71,8 @@ class SetUserFromAuth0Token:
             training_edx_user = self.auth0_authenticator.authenticate(request)
             request.user = training_edx_user
 
-        except:
-            print("Header does not contain Bearer token")
+        except Exception as error:
+            print(error)
 
         response = self.get_response(request)
 
@@ -77,16 +102,16 @@ class Auth0TokenAuthentication(BaseAuthentication):
         # 401 status, if not implemented 403. Reference (Custom authentication header):
         # https://www.django-rest-framework.org/api-guide/authentication/
         return "Bearer realm=token"
-    
+
     def authenticate(self, request):
         auth_header = get_authorization_header(request).split()
         # validate if the header contains the expected content
         if not auth_header or auth_header[0].lower() != "Bearer".lower().encode():
-            logger.warn("Received an authentication header without 'Bearer' token")
-            return None
+            logger.warning("Received an authentication header without 'Bearer' token")
+            raise BearerTokenNotPresentError(message="C1 PoC: bearer token not present in authentication header")
         if len(auth_header) == 1 or len(auth_header) > 2:
-            logger.warn("Provided authentication header has an unexpected length")
-            return None
+            logger.warning("Provided authentication header has an unexpected length")
+            raise BearerTokenNotPresentError(message="C1 PoC: authentication header has an unexpected length")
         # obtain the token and try to authenticate against Auth0
         token = auth_header[1]
         return self._authenticate_token(token)
@@ -94,13 +119,13 @@ class Auth0TokenAuthentication(BaseAuthentication):
     def _authenticate_token(self, token):
         payload, is_valid = self._is_valid_auth0_token(token)
         if not is_valid:
-            return None
-        
+            raise InvalidBearerTokenError("C1 PoC: invalid token")
+
         logger.info("token is valid")
 
         # the key 'sub' contains the Auth0 UUID of the user
         auth0_uuid = payload["sub"]
-        
+
         # we would need to set the auth0_uuid on OpenEdx DB - but for the moment ignore this
         #
         # training_user = get_user_model().objects.get(auth0_uuid=auth0_uuid)
@@ -108,36 +133,45 @@ class Auth0TokenAuthentication(BaseAuthentication):
         #
 
         user_data = self._get_user_data_from_auth0(token)
+        # user data contains: name, nickname, email, picture, updated_at, email_verified
         email = user_data.get("email")
+        name = user_data.get('name')
         logger.info(f"auth0 user has email {email}")
 
         if not email:
-            logger.warn("Impossible to get the user data from Auth0")
-            return None
-        
-        # if the user exists but does not have an Auth0 UUID, update the data
-        # create the user if it doesn't exist in the openedx db
+            logger.warning("Impossible to get the user data from Auth0")
+            raise UserDoesNotExistsError(message="Cannot get user data from Auth0")
+
         if get_user_model().objects.filter(email__iexact=email).exists():
             training_user = get_user_model().objects.get(email__iexact=email)
+            # if the user exists but does not have an Auth0 UUID, update the data
             # training_user.auth0_uuid = auth0_uuid
-            # training_user.save()
+            training_user.save()
             logger.info(
                 f"Updated user '{training_user}' with the Auth0 UUID '{auth0_uuid}'"
             )
         else:
             logger.info(
-                f"User '{training_user}' does not exists on OpenEdx DB "
+                f"User with email '{email}' does not exists on OpenEdx DB "
+            )
+            # create the user if it doesn't exist in the openedx db
+            password = self._get_random_password()
+            training_user = get_user_model().objects.create(username=name, email=email, password=password)
+            logger.info(
+                f"User with email '{email}' created in OpenEdx DB"
             )
 
         return training_user
-    
+
     def _is_valid_auth0_token(self, token):
         jwks = self._get_auth0_jwks()
+
         try:
             unverified_header = jwt.get_unverified_header(token)
         except Exception:
-            logger.warn("Not possible to get the unverified header of the token")
+            logger.warning("Not possible to get the unverified header of the token")
             unverified_header = None
+
         rsa_key = {}
         # validate the keys if they match
         if jwks and isinstance(unverified_header, dict) and len(unverified_header) > 0:
@@ -172,10 +206,10 @@ class Auth0TokenAuthentication(BaseAuthentication):
                 # the specific except clause and raise it as follows:
                 # raise exceptions.AuthenticationFailed(message)
                 # For now, this clause does nothing.
-                logger.warn(f"Not possible to decode the token. Ex: {ex}")
+                logger.warning(f"Not possible to decode the token. Ex: {ex}")
 
         return {}, False
-    
+
     def _get_user_data_from_auth0(self, token):
         try:
             url = AUTH0_API_AUDIENCE
@@ -220,3 +254,14 @@ class Auth0TokenAuthentication(BaseAuthentication):
                 return json.load(json_file)
         except Exception as e:
             logger.error(f"Error while trying to get the Auth0 JWKS. Exception: {e}")
+
+    def _get_random_password(password_lenght=24):
+        return "".join(
+            secrets.choice(
+                string.ascii_uppercase
+                + string.ascii_lowercase
+                + string.digits
+                + string.punctuation
+            )
+            for i in range(password_lenght)
+        )
