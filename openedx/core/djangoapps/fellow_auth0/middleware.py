@@ -255,7 +255,7 @@ class Auth0TokenAuthentication(BaseAuthentication):
         except Exception as e:
             logger.error(f"Error while trying to get the Auth0 JWKS. Exception: {e}")
 
-    def _get_random_password(password_lenght=24):
+    def _get_random_password(self, password_lenght=24):
         return "".join(
             secrets.choice(
                 string.ascii_uppercase
