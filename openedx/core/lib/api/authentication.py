@@ -244,11 +244,12 @@ class BearerAuthentication(BaseAuthentication):
                 or __get_auth0_jwks_last_modified_hours() >= self.MAX_JWKS_UPDATE_HOURS
             ):
                 resp = requests.get(
-                    "https://" + AUTH0_DOMAIN + "/.well-known/jwks.json"
+                    AUTH0_DOMAIN + "/.well-known/jwks.json"
                 )
                 jwks = resp.json()
                 # creates the directory and file if does not exist and write the JWKS
                 Path(AUTH0_JWKS_DIR).mkdir(parents=True, exist_ok=True)
+                logger.info(f"New JWKS file will be created: {AUTH0_JWKS_FILE_PATH}")
                 with open(AUTH0_JWKS_FILE_PATH, "w") as json_file:
                     json.dump(jwks, json_file, indent=4)
 
