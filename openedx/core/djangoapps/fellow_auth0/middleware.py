@@ -11,7 +11,10 @@ from jose import jwt
 
 from django.contrib.auth import get_user_model
 from rest_framework.authentication import BaseAuthentication, get_authorization_header
-
+from common.djangoapps.student.models import (
+    UserProfile,
+    Registration
+)
 logger = getLogger(__name__)
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -136,6 +139,7 @@ class Auth0TokenAuthentication(BaseAuthentication):
         # user data contains: name, nickname, email, picture, updated_at, email_verified
         email = user_data.get("email")
         name = user_data.get('name')
+        username = "middleware_generated_"+name.replace(" ", "_").lower()
         logger.info(f"auth0 user has email {email}")
 
         if not email:
@@ -146,7 +150,11 @@ class Auth0TokenAuthentication(BaseAuthentication):
             training_user = get_user_model().objects.get(email__iexact=email)
             # if the user exists but does not have an Auth0 UUID, update the data
             # training_user.auth0_uuid = auth0_uuid
-            training_user.save()
+            try:
+                training_user.save()
+            except Exception:
+                logger.exception(f"User creation failed for user with email {email}.")
+                raise
             logger.info(
                 f"Updated user '{training_user}' with the Auth0 UUID '{auth0_uuid}'"
             )
@@ -155,8 +163,25 @@ class Auth0TokenAuthentication(BaseAuthentication):
                 f"User with email '{email}' does not exists on OpenEdx DB "
             )
             # create the user if it doesn't exist in the openedx db
-            password = self._get_random_password()
-            training_user = get_user_model().objects.create(username=name, email=email, password=password)
+            training_user = get_user_model().objects.create(username=username, email=email,is_active=True)
+            training_user.set_unusable_password()
+            training_user.save()
+
+            # Replicating what do_create_account does, create a registration and a profile
+            registration = Registration()
+            registration.register(training_user)
+
+            profile = UserProfile(
+                user=training_user,
+                name=name,
+                gender="nb",
+                year_of_birth=1992
+                )
+            try:
+                profile.save()
+            except Exception:
+                logger.exception(f"UserProfile creation failed for user {training_user.id}.")
+                raise
             logger.info(
                 f"User with email '{email}' created in OpenEdx DB"
             )
@@ -239,9 +264,8 @@ class Auth0TokenAuthentication(BaseAuthentication):
                 not os.path.exists(AUTH0_JWKS_FILE_PATH)
                 or __get_auth0_jwks_last_modified_hours() >= self.MAX_JWKS_UPDATE_HOURS
             ):
-                resp = requests.get(
-                    "https://" + AUTH0_DOMAIN + "/.well-known/jwks.json"
-                )
+                url = AUTH0_DOMAIN + "/.well-known/jwks.json"
+                resp = requests.get(url)
                 jwks = resp.json()
                 # creates the directory and file if does not exist and write the JWKS
                 Path(AUTH0_JWKS_DIR).mkdir(parents=True, exist_ok=True)
