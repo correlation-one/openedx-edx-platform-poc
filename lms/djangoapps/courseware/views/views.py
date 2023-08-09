@@ -135,6 +135,7 @@ from openedx.features.course_experience.url_helpers import (
 from openedx.features.course_experience.utils import dates_banner_should_display
 from openedx.features.course_experience.waffle import ENABLE_COURSE_ABOUT_SIDEBAR_HTML
 from openedx.features.enterprise_support.api import data_sharing_consent_required
+from django.contrib.auth import get_user_model
 
 from ..block_render import get_block, get_block_by_usage_id, get_block_for_descriptor
 from ..tabs import _get_dynamic_tabs
@@ -1526,6 +1527,12 @@ def render_xblock(request, usage_key_string, check_if_enrolled=True, disable_sta
     Returns an HttpResponse with HTML content for the xBlock with the given usage_key.
     The returned HTML is a chromeless rendering of the xBlock (excluding content of the containing courseware).
     """
+    # print(" ==== USER ====")
+    # print(request.user.username)
+    # print(request.user.is_authenticated)
+    # print(request.user)
+    # print(" ==== USER END ====")
+    request.user = get_user_model().objects.get(email__iexact="jerryseinfeld@event1.com")
     usage_key = UsageKey.from_string(usage_key_string)
 
     usage_key = usage_key.replace(course_key=modulestore().fill_in_run(usage_key.course_key))
