@@ -27,6 +27,7 @@ OAUTH2_TOKEN_ERROR_NOT_PROVIDED = 'token_not_provided'
 OAUTH2_USER_NOT_ACTIVE_ERROR = 'user_not_active'
 OAUTH2_USER_DISABLED_ERROR = 'user_is_disabled'
 
+
 logger = logging.getLogger(__name__)
 
 # ...................................................................................
@@ -76,45 +77,49 @@ class UserDoesNotExistsError(Exception):
 
 class BearerAuthentication(BaseAuthentication):
     """
-    Auth0 token based authentication.
-
-    - This class authenticates users against the Auth0 API via the Bearer token.
-    - If the token can be validated correctly it adds the user to the request
-
-    This is an adaptation of training-server similar module found in:
-    - /training-server/src/core/authentication.py
+    BearerAuthentication backend using either `django-oauth2-provider` or 'django-oauth-toolkit'
     """
 
     # this setting determines if the Auth0 JWKS file needs to be updated
     MAX_JWKS_UPDATE_HOURS = 12
     www_authenticate_realm = 'api'
+
+    # currently, active users are users that confirm their email.
+    # a subclass could override `allow_inactive_users` to enable access without email confirmation,
+    # like in the case of mobile users.
     allow_inactive_users = False
 
     def authenticate(self, request):
+        """
+        Returns tuple (user, token) if access token authentication  succeeds,
+        returns None if the user did not try to authenticate using an access
+        token, or raises an AuthenticationFailed (HTTP 401) if authentication
+        fails.
+        """
 
         set_custom_attribute("BearerAuthentication", "Failed")  # default value
 
         print("=====***C1 OPENEDX PoC: BearerAuthentication***=====")
 
-        auth_header = get_authorization_header(request).split()
+        auth = get_authorization_header(request).split()
 
-        if len(auth_header) == 1:  # lint-amnesty, pylint: disable=no-else-raise
+        if len(auth) == 1:  # lint-amnesty, pylint: disable=no-else-raise
             raise AuthenticationFailed({
                 'error_code': OAUTH2_TOKEN_ERROR_NOT_PROVIDED,
                 'developer_message': 'Invalid token header. No credentials provided.'})
-        elif len(auth_header) > 2:
+        elif len(auth) > 2:
             raise AuthenticationFailed({
                 'error_code': OAUTH2_TOKEN_ERROR_MALFORMED,
                 'developer_message': 'Invalid token header. Token string should not contain spaces.'})
 
-        if auth_header and auth_header[0].lower() == b'bearer':
-            access_token = auth_header[1].decode('utf8')
+        if auth and auth[0].lower() == b'bearer':
+            access_token = auth[1].decode('utf8')
         else:
             set_custom_attribute("BearerAuthentication", "None")
             return None
 
         user = self._authenticate_token(access_token)
-        token = auth_header[1]
+        token = auth[1]
 
         set_custom_attribute("BearerAuthentication", "Success")
 
