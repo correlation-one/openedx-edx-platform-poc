@@ -1,3 +1,9 @@
+Repository Archived
+###################
+
+OpenedX project shutdown Q2-2024
+
+
 Open edX Platform
 #################
 | |License: AGPL v3| |Status| |Python CI|
